@@ -5,6 +5,7 @@ Generates a script that rotates the password on a Veeam Backup & Replication "Cr
 Two variants are provided:
 
 * [Python](#python-prompt): processes servers sequentially. Simple to read and adapt.
+* [Python in Docker](#docker-add-on-for-the-python-variant): an add-on to the Python prompt that also produces a Dockerfile, for hosts with no Python or a locked-down environment.
 * [Go](#go-prompt-parallel): processes servers concurrently with goroutines and a configurable worker limit. Better for large estates.
 
 | | |
@@ -35,6 +36,32 @@ Requirements:
 8. Logging: Use Python's `logging` module with timestamps, prefixed per-server, rather than bare `print()`.
 
 Use the `requests` library. Structure it with a small class wrapping the per-server session/auth/calls, and a `main()` with `argparse` for the CLI. Include a docstring at the top explaining usage and the config file format.
+```
+
+## Docker add-on for the Python variant
+
+If the target host has no Python, or you cannot install packages on it, paste the Python prompt above and then append the block below. It asks the model to package the same script as a container image without changing the script itself.
+
+```text
+Also package the script as a container image:
+
+1. Dockerfile: Use a pinned slim official Python base image (for example `python:3.12-slim`). Copy in a `requirements.txt` containing `requests` with a pinned version, install with `pip install --no-cache-dir`, and copy the script last so dependency layers are cached.
+2. Non-root: Create an unprivileged user and switch to it before the `ENTRYPOINT`.
+3. Entrypoint: Set `ENTRYPOINT ["python", "/app/rotate_vbr_password.py"]` so any CLI flags passed to `docker run` go straight to the script.
+4. Config outside the image: The JSON config file must never be copied into the image. Document mounting it read-only at run time, for example `-v /path/to/servers.json:/config/servers.json:ro`, and have the script default its `--config` path to `/config/servers.json`.
+5. Secret handling: Document passing the new password with `-e VBR_NEW_PASSWORD` and no value, so Docker inherits it from the caller's environment and it never appears in shell history or `docker inspect` output as a literal. Also show the `--env-file` alternative. Do not show `-e VBR_NEW_PASSWORD=<value>` anywhere.
+6. Usage: Add a section to the top-of-file docstring and a short `README` snippet showing `docker build` and a full `docker run` example that includes the config mount, the environment variable, and the `--insecure` flag pass-through.
+7. Keep the script unchanged apart from the default config path. It must still run directly with `python` outside the container.
+```
+
+Example of the `docker run` shape the model should produce:
+
+```bash
+export VBR_NEW_PASSWORD='...'
+docker run --rm \
+  -v "$PWD/servers.json:/config/servers.json:ro" \
+  -e VBR_NEW_PASSWORD \
+  vbr-rotate-password:latest --insecure
 ```
 
 ## Go prompt (parallel)
@@ -72,6 +99,8 @@ Include a doc comment at the top explaining usage, the flags, and the config fil
 * If you are on a different VBR version, change the version and API revision in the first line and the reference URL. Endpoint paths and the `x-api-version` header value differ between revisions.
 * Check that the generated code handles token expiry if you have a long server list, and that it never logs the new password or the bearer token.
 * Check whether `nameFilter` matches on substring in your API revision, and make sure the code checks for an exact username match rather than taking the first result.
+* If the problem is a messy Python environment rather than no Python at all, `uv run --with requests rotate_vbr_password.py` or `pipx run` is far less ceremony than building an image. Use Docker when the host has no Python or you cannot install anything on it.
+* The container needs network access to every VBR server in the config. This is normally fine, but Docker Desktop on a VPN-connected laptop can route container traffic differently from the host, so test against one server first.
 * For the Go variant, start with a low `-concurrency` value. Every worker opens its own auth session on a different VBR server, so the limit is mostly about how many parallel logins you are comfortable with, but very high values can trip rate limits or lockout policies.
 * The Go variant should compile into a single static binary, which is handy for running from a jump host that has no Python installed.
 

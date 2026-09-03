@@ -38,7 +38,7 @@ Folders are prefixed by product, following the VeeamHub convention:
 
 | Prompt | Description | Output |
 | ------ | ----------- | ------ |
-| [BR-RotateCredentialPassword](BR-RotateCredentialPassword/) | Rotate the password on a VBR credentials record across multiple backup servers via the v13 REST API. Python (sequential) and Go (parallel, goroutines) variants | Python or Go |
+| [BR-RotateCredentialPassword](BR-RotateCredentialPassword/) | Rotate the password on a VBR credentials record across multiple backup servers via the v13 REST API. Python (sequential, with an optional Docker add-on) and Go (parallel, goroutines) variants | Python or Go |
 
 ## ✍ Contributions
 
