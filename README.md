@@ -40,6 +40,12 @@ Folders are prefixed by product, following the VeeamHub convention:
 | ------ | ----------- | ------ |
 | [BR-RotateCredentialPassword](BR-RotateCredentialPassword/) | Rotate the password on a VBR credentials record across multiple backup servers via the v13 REST API. Python (sequential, with an optional Docker add-on) and Go (parallel, goroutines) variants | Python or Go |
 
+### Veeam Backup for Microsoft Azure
+
+| Prompt | Description | Output |
+| ------ | ----------- | ------ |
+| [VBAz-AzureEnvironmentAssessment](VBAz-AzureEnvironmentAssessment/) | Read-only discovery of every Veeam-protectable Azure workload (VMs, Azure SQL, SQL MI, Cosmos DB, Azure Files, Blob, vNet config, optional AKS / AVS / Entra ID). Places each resource in its subscription, region, vNet and subnet, and records how it is reached on the network, for worker placement and design | PowerShell script, CSV + JSON |
+
 ## ✍ Contributions
 
 Contributions are very welcome. Open an [issue](../../issues/new/choose) to suggest or report a prompt, or submit a pull request to add or update one. See the [Contributing Guide](CONTRIBUTING.md) for the prompt format and folder conventions.
