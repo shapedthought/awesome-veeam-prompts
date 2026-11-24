@@ -9,7 +9,7 @@ What sets it apart from a plain inventory is that **every resource is placed in 
 | **Product** | Veeam Backup for Microsoft Azure 8 (standalone or as the Veeam Backup & Replication 13 plug-in), plus Veeam Backup & Replication 13 and Veeam Kasten for the optional modules |
 | **Interface** | Azure PowerShell (`Az` 12.0 or later, management plane only) |
 | **Output** | PowerShell script producing CSV files, an environment summary and a JSON environment map |
-| **Tested with** | Not yet run through an LLM end to end. Please update this row when it has been. |
+| **Tested with** | Claude (2026-11-24): a fresh session given only the two blocks below produced a single-file script (about 2,700 lines) that parsed cleanly, showed no PowerShell-7-only syntax, and passed its own 13 Pester tests with every Az cmdlet mocked. The prompt was then tightened from that session's list of ambiguities. **Not yet run against a real Azure tenant**, so Az object property names for Cosmos DB, AKS, AVS and the Backup vault cmdlets are unconfirmed. |
 | **Author** | [@shapedthought](https://github.com/shapedthought) |
 | **Origin** | Expanded from the VM-only [`azure_assessment.ps1`](https://github.com/shapedthought/powershell/blob/main/azure_assessment.ps1) and its [spec](https://github.com/shapedthought/powershell/blob/main/azure_assessment_spec.md) |
 
@@ -40,8 +40,8 @@ vm         | Microsoft.Compute/virtualMachines, Microsoft.Compute/disks
            | TrustedLaunch, ConfidentialVM). Report unattached managed disks
            | separately, because they are capacity that no VM policy will cover.
 
-sqldb      | Microsoft.Sql/servers/databases (single and elastic pool),
-           | Microsoft.Sql/servers/elasticPools
+sqldb      | Microsoft.Sql/servers, Microsoft.Sql/servers/databases (single
+           | and elastic pool), Microsoft.Sql/servers/elasticPools
            | Veeam Backup for Microsoft Azure: Azure SQL Database
            | Exclude the "master" database. Capture the server's network access
            | (public, firewall rules, "Allow Azure services", private endpoints)
@@ -62,7 +62,8 @@ cosmos     | Microsoft.DocumentDB/databaseAccounts,
            | API = Table       -> Veeam Backup for Microsoft Azure: Cosmos DB for Table
            | PostgreSQL        -> Veeam Backup for Microsoft Azure: Cosmos DB for PostgreSQL
            | API = Cassandra   -> Not supported (inventory only)
-           | Protection blockers: Veeam does not process accounts that use
+           | Protection blockers (Microsoft.DocumentDB/databaseAccounts only;
+           | leave empty for PostgreSQL clusters): Veeam does not process accounts that use
            | periodic backup mode or have multi-region writes enabled (it
            | relies on Azure continuous backup), and cannot restore accounts
            | encrypted with customer-managed keys. Capture backup policy type
@@ -179,6 +180,7 @@ Requirements:
      Az.Network, Az.Sql, Az.CosmosDB, Az.Storage, Az.Monitor, Az.Resources,
      Az.RecoveryServices, Az.DataProtection, Az.Aks, Az.VMware,
      Microsoft.Graph.Authentication / Microsoft.Graph.Identity.DirectoryManagement).
+     A missing Az.Monitor behaves as -SkipMetrics.
      A missing sub-module disables only the modules that need it, with a
      yellow warning and a row in errors.csv. It never aborts the run.
    - Consent prompt: print that this is an unofficial community script, not
@@ -192,7 +194,10 @@ Requirements:
    Pass 3 -- resolve placement for every workload row against the backbone
    from ALL subscriptions. A private endpoint, NIC or vNet frequently lives
    in a different subscription (hub-and-spoke) from the resource it serves,
-   so resolving only within the current subscription is a bug.
+   so resolving only within the current subscription is a bug. (A VM, its
+   NICs and the NICs' vNet are always in the same subscription; private
+   endpoints, vNet rules and AKS/AVS networking are the cross-subscription
+   cases.)
    Build hashtable lookups keyed on lower-cased resource ID. Never use
    Where-Object inside a per-resource loop.
 
@@ -202,7 +207,14 @@ Requirements:
      Region, Zones, ResourceName, ResourceType, NetworkAccess,
      VNetSubscriptionId, VNetResourceGroup, VNetName, SubnetName,
      SubnetPrefix, PrivateEndpointCount, CandidateVeeamProtection
-   followed by the -TagNames columns, then the module-specific columns.
+   followed by one Tag_<key> column per -TagNames entry, then the
+   module-specific columns.
+   - Child rows (disks, elastic pools, SQL MI databases, file shares,
+     blob containers, AKS node pools, vault items) carry their own
+     ResourceKey and ResourceName but inherit every other placement column
+     from their parent: the attached VM for a disk (an unattached disk has
+     blank network columns and NetworkAccess N/A), otherwise the parent
+     server, instance, storage account, cluster or vault.
    - ResourceKey is the lower-cased Azure resource ID. It is the join key
      across all files, including network_attachments.csv.
    - NetworkAccess is exactly one of, in this precedence order:
@@ -215,7 +227,12 @@ Requirements:
        VNetRules            public endpoint restricted to selected vNets
                             (service endpoints / virtual network rules)
        PublicFirewall       public endpoint restricted by IP rules only
+                            (including default Deny with zero rules; SQL
+                            servers without an allow-all 0.0.0.0-
+                            255.255.255.255 rule also count as this)
        Public               public endpoint open to all networks
+       PublicDisabled       public access disabled and no private endpoint
+                            (unreachable until connectivity is added)
        N/A                  resource has no network surface of its own
    - The VNet*/Subnet* columns describe the primary attachment: the primary
      NIC for a VM, the delegated subnet for SQL MI, the first node pool
@@ -235,9 +252,14 @@ Requirements:
    virtual_networks.csv: placement columns (NetworkAccess = N/A), address
    spaces, DNS servers, DDoS protection, peering count, peered vNet names
    and peering state, subnet count.
+   On vNet and subnet rows the placement VNet*/Subnet* columns describe the
+   row itself and PrivateEndpointCount is the number of private endpoints in
+   it.
    subnets.csv: placement columns plus SubnetPrefix (all prefixes, joined
-   with ";"), PrefixLength, TotalIPs, UsedIPs (IP configurations + private
-   endpoint NICs), AvailableIPs (total minus Azure's 5 reserved minus used),
+   with ";"), PrefixLength, TotalIPs, UsedIPs (distinct IDs across the
+   subnet's IP configurations and its private endpoints' NIC IP
+   configurations; they overlap, so de-duplicate), AvailableIPs (total minus
+   Azure's 5 reserved addresses per prefix minus used),
    NSG name, route table name, NAT gateway, service endpoints (flag
    Microsoft.Storage and Microsoft.Storage.Global explicitly), delegations,
    private endpoint network policies, and a boolean
@@ -248,7 +270,7 @@ Requirements:
 
 7. Module-specific columns (add these after the placement and tag columns).
    Report sizes in GiB, with the column name ending _GiB, rounded to 2 dp.
-   - vm (vms.csv): VmSize, vCPUs and MemoryGiB from Get-AzComputeResourceSku
+   - vm (vms.csv): VmSize, vCPUs and Memory_GiB from Get-AzComputeResourceSku
      cached per region, OsType, image publisher/offer/sku, HyperVGeneration,
      SecurityType, PowerState (from one Get-AzVM -Status call per
      subscription, not one per VM), AvailabilitySet, ProximityPlacementGroup,
@@ -269,7 +291,7 @@ Requirements:
      sql_elastic_pools.csv: pool, edition, capacity, MaxSize_GiB, database
      count.
    - sqlmi (sql_managed_instances.csv): instance, SKU, vCores, StorageSize_GiB,
-     StorageUsed_GiB (metric), LicenseType, PublicDataEndpointEnabled,
+     StorageUsed_GiB and ReservedStorage_GiB (metrics), LicenseType, PublicDataEndpointEnabled,
      ProxyOverride, database count; sql_mi_databases.csv: one row per
      database with the instance's placement columns.
    - cosmos (cosmos_accounts.csv): ApiKind (NoSQL, MongoDB, MongoDBvCore,
@@ -290,8 +312,9 @@ Requirements:
      account's Kind, Sku, LargeFileShares, AzureFilesIdentityBasedAuth.
    - blob (storage_accounts.csv, one row per account, all accounts):
      Kind, Sku/redundancy, AccessTier, HnsEnabled, UsedCapacity_GiB,
-     BlobCapacity_GiB, FileCapacity_GiB (metrics), ContainerCount,
-     FileShareCount, versioning, blob soft delete (days), container soft
+     BlobCapacity_GiB, FileCapacity_GiB (metrics), ContainerCount and
+     FileShareCount (counted from Get-AzRmStorageContainer and
+     Get-AzRmStorageShare, not from metrics), versioning, blob soft delete (days), container soft
      delete, change feed, point-in-time restore, immutability, SFTP, NFSv3,
      AllowSharedKeyAccess, MinimumTlsVersion, PublicNetworkAccess, default
      network action, IP rule count, vNet rule count,
@@ -300,16 +323,19 @@ Requirements:
      say in a comment that it is a heuristic.
    - aks (aks_clusters.csv + aks_node_pools.csv), avs (avs_private_clouds.csv),
      entra (entra_tenant.csv) per the workload map.
-   - other (other_resources_summary.csv): SubscriptionId, SubscriptionName,
+   - other (other_resources_summary.csv): every resource type, including
+     those in the workload map, with SubscriptionId, SubscriptionName,
      Region, ResourceType, Count, InWorkloadMap (true/false).
+   - The mongoClusters and serverGroupsv2 types have no dedicated Az
+     cmdlets: read them with Get-AzResource -ResourceType ... -ExpandProperties.
 
 8. Metrics (unless -SkipMetrics). Use Get-AzMetric with an aggregation of
    Maximum (Average for capacity metrics that only expose Average) over the
    last 24 hours at the coarsest grain the metric supports. Use exactly
    these metric names:
      storage account:              UsedCapacity
-     .../blobServices/default:     BlobCapacity, ContainerCount
-     .../fileServices/default:     FileCapacity, FileShareCount
+     .../blobServices/default:     BlobCapacity
+     .../fileServices/default:     FileCapacity
      SQL database:                 storage, allocated_data_storage
      SQL managed instance:         storage_space_used_mb, reserved_storage_mb
      Cosmos DB account:            DataUsage, IndexUsage
@@ -318,13 +344,15 @@ Requirements:
    fall back to provisioned size in a "used" column.
 
 9. Environment summary outputs:
-   environment_summary.csv -- one row per SubscriptionId x Region x
-   VNetName (use "(none)" when a resource has no vNet attachment, so public
+   environment_summary.csv -- one row per resource SubscriptionId x Region
+   x vNet (identified by VNetSubscriptionId, VNetResourceGroup and VNetName,
+   since vNet names are not unique; use "(none)" when a resource has no vNet attachment, so public
    PaaS is visible as its own bucket), with: SubscriptionName,
    NetworkAccess mix (e.g. "PrivateEndpointOnly:4;Public:2"), and for each
    module a count column and a capacity column (VMs + provisioned GiB, SQL
    DBs + used GiB, SQL MI + used GiB, Cosmos accounts + data GiB, file
-   shares + used GiB, storage accounts + blob GiB), plus
+   shares + used GiB, storage accounts + blob GiB, AKS clusters + node count,
+   AVS private clouds + host count), plus
    WorkerCapableSubnets (count of subnets in that vNet with
    CanHostVeeamWorkers = true).
    region_summary.csv -- one row per Region with the totals, the number of
@@ -337,13 +365,15 @@ Requirements:
    and check that depth is enough for the nesting you build.
 
 10. Resilience:
-   - A failing subscription, module or resource is caught, logged and
-     skipped. The run always finishes and always writes every CSV header,
+   - A failing subscription (cannot set context, or 401/403 on the first
+     call), module or resource is caught, logged and skipped. A subscription
+     is listed as skipped in the manifest only when nothing could be read
+     from it. The run always finishes and always writes every CSV header,
      even for an empty result, so downstream tooling does not break.
    - errors.csv: Timestamp, SubscriptionId, Module, ResourceKey, Operation,
      Message. Summarise the error count per module at the end.
-   - Retry Azure calls that fail with HTTP 429 or 5xx up to 4 times with
-     exponential backoff, via one helper function. Do not retry 403/404.
+   - Retry Azure calls that fail with HTTP 429 or 5xx up to 4 retries (5
+     attempts in total) with exponential backoff, via one helper function. Do not retry 403/404.
    - Use -ErrorAction Stop inside try/catch for calls whose failure should
      be logged, rather than SilentlyContinue, so nothing fails silently.
    - Set the subscription context with Set-AzContext -SubscriptionId per
@@ -360,9 +390,12 @@ Requirements:
    - Backup vaults (Az.DataProtection): backup instances (blobs, disks,
      PostgreSQL, AKS) and their policies.
    - backup_coverage.csv: one row per in-scope workload ResourceKey with
-     NativeBackup = RecoveryServicesVault / BackupVault / None, the vault
-     name and policy.
-   Vault files carry the vault's own placement columns.
+     NativeBackup = RecoveryServicesVault / BackupVault / PlatformBuiltIn
+     (Azure SQL and Cosmos DB automatic backups, when no vault covers them)
+     / None, the vault name and policy. If both vault types cover a
+     resource, list both, joined with ";".
+   Vault files carry the vault's own placement columns, with
+   CandidateVeeamProtection left blank.
 
 12. Progress and output: Write-Host with Cyan for progress, Green for
    success, Yellow for warnings and skips; a per-subscription and
@@ -395,7 +428,11 @@ Requirements:
      report back), regions, zones, SKUs, sizes, counts, flags, versions,
      protocol and state values, timestamps, NetworkAccess and
      CandidateVeeamProtection.
-   - Output file names must not contain any unhashed name.
+   - Output file names must not contain any unhashed name, and nor may
+     errors.csv messages: Azure error text embeds resource names, so
+     replace every raw value that has been masked during the run with its
+     hash before writing the message. Do the same for the OutputPath in
+     manifest.json.
 
 14. Structure: a comment-based help block (synopsis, description,
    every parameter, examples for a full run, a Cloud Shell run, a
@@ -409,7 +446,7 @@ Requirements:
 
 Before showing me the result, write Pester 5 tests that mock the Az
 cmdlets (no Azure connection) and cover: a VM whose NIC is in a vNet in a
-different subscription; a storage account whose private endpoint is in a
+different resource group; a storage account whose private endpoint is in a
 hub subscription; a SQL MI on a delegated subnet; a subscription that
 returns 403 and is skipped while the run completes; a Cosmos DB account in
 periodic backup mode with multi-region writes gets both ProtectionBlockers
@@ -477,6 +514,8 @@ dev,westeurope,vnet-dev,VNetInjected:17;VNetRules:1,17,2210,0,0,1,12.0,0
 * Anonymised output is linkable within a run, and across runs only if you pass the same `-AnonymiseSalt`. The original script used an unsalted 8-character SHA-256 hash. An unsalted hash of an IPv4 address can be reversed by brute force in seconds, which is why this version uses a keyed HMAC and keeps subnet prefix lengths in clear.
 * Subscription and tenant IDs are deliberately left in clear so the customer can map the report back. Remove them yourself if the report leaves the organisation.
 * For large estates (hundreds of subscriptions), per-subscription cmdlets are slow. A sensible follow-up prompt is to move pass 1 and the `other` module onto Azure Resource Graph (`Search-AzGraph`, with paging past 1,000 rows), keeping metrics and the backup module on cmdlets.
+* The test run could not check Az object property names against real objects. The ones to check first on a live run: the Cosmos DB continuous backup tier, AKS storage profile (CSI driver) fields, AVS cluster and ExpressRoute fields, the nested `Property` objects returned by the Az.DataProtection cmdlets, and whether `Get-AzPrivateEndpoint` and `Get-AzCosmosDBAccount` work without `-ResourceGroupName` in your Az version. A wrong property name shows up as a blank column, not an error, so compare a few rows with the portal.
+* Windows PowerShell 5.1 silently truncates `ConvertTo-Json` output deeper than `-Depth`, where PowerShell 7 warns. If `environment_map.json` looks shallow on 5.1, that is why.
 * Models tend to get these wrong: parsing vNet names out of subnet IDs with `Split('/')[-3]` (fine for NICs, wrong for anything else), calling `Get-AzVM -Status` once per VM, resolving private endpoints only within the current subscription, using `ConvertTo-Json` with the default depth of 2, and counting `master` as a SQL database. The requirements call each of these out, so check them in the output.
 
 ## Disclaimer
