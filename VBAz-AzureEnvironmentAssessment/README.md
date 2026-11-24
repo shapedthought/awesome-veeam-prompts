@@ -9,7 +9,7 @@ What sets it apart from a plain inventory is that **every resource is placed in 
 | **Product** | Veeam Backup for Microsoft Azure 8 (standalone or as the Veeam Backup & Replication 13 plug-in), plus Veeam Backup & Replication 13 and Veeam Kasten for the optional modules |
 | **Interface** | Azure PowerShell (`Az` 12.0 or later, management plane only) |
 | **Output** | PowerShell script producing CSV files, an environment summary and a JSON environment map |
-| **Tested with** | Claude (2026-11-24). A fresh session given only the two blocks below generated the script. The prompt was then tightened from that session's list of ambiguities, and the script was updated to match (not regenerated from scratch). The result is a single file of about 2,900 lines that parses cleanly, uses no PowerShell-7-only syntax, and passes 21 Pester tests with every Az cmdlet mocked. **Not yet run against a real Azure tenant**, so Az object property names for Cosmos DB, AKS, AVS and the Backup vault cmdlets are unconfirmed. |
+| **Tested with** | Claude (2026-11-24). A fresh session given only the two blocks below generated the script. The prompt was then tightened from that session's list of ambiguities, and the script was updated to match (not regenerated from scratch). The result is a single file of about 3,000 lines that parses cleanly, uses no PowerShell-7-only syntax, and passes 36 Pester tests with every Az cmdlet mocked. **Not yet run against a real Azure tenant**, so Az object property names for Cosmos DB, AKS, AVS and the Backup vault cmdlets are unconfirmed. |
 | **Author** | [@shapedthought](https://github.com/shapedthought) |
 | **Origin** | Expanded from the VM-only [`azure_assessment.ps1`](https://github.com/shapedthought/powershell/blob/master/azure_assessment.ps1) and its [spec](https://github.com/shapedthought/powershell/blob/master/azure_assessment_spec.md) |
 | **Generated script** | [`azure_environment_assessment.ps1`](https://github.com/shapedthought/powershell/blob/master/azure_environment_assessment.ps1) and its Pester tests, in shapedthought/powershell |
@@ -112,7 +112,10 @@ entra      | Microsoft Entra ID tenant                     (optional module)
            | practice), not a Veeam Backup for Microsoft Azure workload.
            | Counts only: users, groups, applications, service principals,
            | conditional access policies, administrative units. Uses
-           | Microsoft.Graph read scopes, not Az.
+           | Microsoft.Graph read scopes, not Az. The Graph context must be
+           | for the assessed tenant: reconnect with -TenantId if it is not,
+           | and skip the module rather than report another tenant's counts.
+           | Follow @odata.nextLink so counts are not capped at one page.
 
 other      | Every other resource type returned by Get-AzResource
            | None (gap analysis only)
@@ -226,8 +229,15 @@ Requirements:
      'file' endpoints, plus the account's public access and network rules;
      storage_accounts.csv rows (the Blob workload) use only 'blob' and 'dfs'
      endpoints. An account with public access disabled and only a 'blob'
-     endpoint therefore has PublicDisabled file shares. List every endpoint
-     in network_attachments.csv regardless.
+     endpoint therefore has PublicDisabled file shares. FileStorage
+     (file-only) accounts are the Azure Files workload: their
+     storage_accounts.csv row uses 'file' endpoints and the Azure Files
+     CandidateVeeamProtection. List every endpoint in
+     network_attachments.csv regardless.
+   - Only private endpoint connections in the Approved state (automatic or
+     manual) make a resource reachable and count in PrivateEndpointCount.
+     Pending and rejected endpoints still count towards their subnet's
+     UsedIPs.
    - ResourceKey is the lower-cased Azure resource ID. It is the join key
      across all files, including network_attachments.csv.
    - NetworkAccess is exactly one of, in this precedence order:
@@ -250,6 +260,13 @@ Requirements:
                             255.255.255.255 rule)
        Public               public endpoint enabled and open to all networks
        N/A                  resource has no network surface of its own
+       Unknown              private endpoint or vNet listing failed in at
+                            least one subscription, so an endpoint may exist
+                            that the run could not see. Use it instead of a
+                            confident value for any resource that could have
+                            an endpoint but showed none, and leave its
+                            PrivateEndpointCount blank. Record the failed
+                            subscriptions in the manifest.
    - The VNet*/Subnet* columns describe the primary attachment: the primary
      NIC for a VM, the delegated subnet for SQL MI, the first node pool
      subnet for AKS, the first private endpoint for PaaS, otherwise the first
@@ -370,7 +387,10 @@ Requirements:
    shares + used GiB, storage accounts + blob GiB, AKS clusters + node count,
    AVS private clouds + host count), plus
    WorkerCapableSubnets (count of subnets in that vNet with
-   CanHostVeeamWorkers = true).
+   CanHostVeeamWorkers = true). A capacity total is blank, not 0, when no
+   value in the bucket is known (for example with -SkipMetrics), and each
+   capacity column has a matching <Module>CapacityComplete column that is
+   False when only some values were known.
    region_summary.csv -- one row per Region with the totals, the number of
    distinct subscriptions and vNets holding in-scope resources, and whether
    at least one CanHostVeeamWorkers subnet exists in the region.
@@ -394,6 +414,10 @@ Requirements:
      be logged, rather than SilentlyContinue, so nothing fails silently.
    - Set the subscription context with Set-AzContext -SubscriptionId per
      subscription, and restore the user's original context at the end.
+   - Every file write is terminating. Exit with code 1, still writing
+     whatever diagnostics can be written, when the run fails before or
+     during discovery (sign-in, subscription listing), when any write
+     fails, or when anonymisation fails.
 
 11. -BackupAssessment (existing native protection, to show what is already
    covered and what Veeam would replace):
@@ -409,8 +433,11 @@ Requirements:
      NativeBackup = RecoveryServicesVault / BackupVault / PlatformBuiltIn
      (the automatic backups of Azure SQL Database, SQL Managed Instance and
      Cosmos DB, when no vault covers them)
-     / None, the vault name and policy. If both vault types cover a
-     resource, list both, joined with ";".
+     / None / Unknown, the vault name, policy and ProtectionState (so
+     stopped protection is visible). Report None only when backup discovery
+     succeeded for that subscription; if the backup modules are missing or
+     vault or item enumeration failed, report Unknown. If both vault types
+     cover a resource, list both, joined with ";".
    Vault files carry the vault's own placement columns, with
    CandidateVeeamProtection left blank.
 
@@ -419,7 +446,9 @@ Requirements:
    per-module timer; and a final table showing each output file and its
    row count. Write a manifest.json with the script version, start/end
    time, PowerShell and Az versions, parameters used (without the salt),
-   the subscriptions processed and skipped, and whether anonymisation was on.
+   the subscriptions processed and skipped, whether anonymisation was on,
+   the exit code, BackboneComplete, and the subscriptions whose private
+   endpoint listing failed.
    All CSVs: UTF-8, -NoTypeInformation, written once at the end of the run
    from List[object] collections (no += on arrays).
 
@@ -453,6 +482,11 @@ Requirements:
      the script (for example "HTTP 403; AuthorizationFailed"), or "details
      withheld (anonymised)" when neither is present. Hash the manifest's
      OutputPath as a whole, since it can contain user or customer names.
+   - Mask every row, errors.csv included, before writing anything. If
+     masking fails, write no data (only a manifest that records the
+     failure) and exit 1, so half-masked output can never be labelled
+     anonymised. Console progress and warnings must print only masked or
+     allowlisted text, and Az/Graph warning streams are suppressed.
 
 14. Structure: a comment-based help block (synopsis, description,
    every parameter, examples for a full run, a Cloud Shell run, a
@@ -529,6 +563,7 @@ dev,westeurope,vnet-dev,VNetInjected:17;VNetRules:1,17,2210,0,0,1,12.0,0
 * Run it against one small subscription with `-Modules vm,vnet` first. Check that the vNet and subnet columns in `vms.csv` match what the portal shows before trusting the full run.
 * The script is read-only by design. If the generated code calls `Get-AzStorageAccountKey`, `New-AzStorageContext`, `New-AzStorageAccountSASToken`, `Invoke-Sqlcmd`, or any `Set-`, `New-`, `Update-` or `Remove-` cmdlet, reject it. Data-plane access is not needed for sizing, and it would need far more than Reader.
 * Hub-and-spoke is the common case, not the edge case: private endpoints and their DNS zones often live in a connectivity subscription. If the account running the script cannot read that subscription, PaaS rows will show `PrivateEndpoint*` access with blank vNet columns, and `errors.csv` will say why. Ask for Reader on the hub too.
+* **Open design choice:** `NetworkAccess = Unknown` is used when private endpoint or vNet listing *failed* in a subscription the run could otherwise read. A subscription skipped entirely with 403 does **not** trigger it. That subscription's private endpoints are just as invisible, but counting it would turn every resource with no visible endpoint into `Unknown` whenever one subscription in the estate is unreadable. If your estate keeps private endpoints in a hub subscription, make sure the run can read the hub, and check `errors.csv` for skipped subscriptions before trusting `PublicDisabled`.
 * Worker sizing uses `AvailableIPs` and `CanHostVeeamWorkers`. Worker instances need free addresses in a subnet in each region they process, and the usable count is the prefix size minus 5 Azure-reserved addresses minus existing IP configurations. Check the current Veeam Backup for Microsoft Azure guide for the exact per-region requirement and the service endpoint settings for private deployments.
 * "Used" columns come from Azure Monitor metrics, which can lag by a few hours and are missing for resources that have just been created. Blank means unknown, not zero. With `-SkipMetrics`, sizing falls back to provisioned or quota values only, and those columns are labelled as such.
 * Anonymised output is linkable within a run, and across runs only if you pass the same `-AnonymiseSalt`. The original script used an unsalted 8-character SHA-256 hash. An unsalted hash of an IPv4 address can be reversed by brute force in seconds, which is why this version uses a keyed HMAC and keeps subnet prefix lengths in clear.
