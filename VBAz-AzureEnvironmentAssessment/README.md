@@ -9,7 +9,7 @@ What sets it apart from a plain inventory is that **every resource is placed in 
 | **Product** | Veeam Backup for Microsoft Azure 8 (standalone or as the Veeam Backup & Replication 13 plug-in), plus Veeam Backup & Replication 13 and Veeam Kasten for the optional modules |
 | **Interface** | Azure PowerShell (`Az` 12.0 or later, management plane only) |
 | **Output** | PowerShell script producing CSV files, an environment summary and a JSON environment map |
-| **Tested with** | Claude (2026-11-24). A fresh session given only the two blocks below generated the script. The prompt was then tightened from that session's list of ambiguities, and the script was updated to match (not regenerated from scratch). The result is a single file of about 2,900 lines that parses cleanly, uses no PowerShell-7-only syntax, and passes 20 Pester tests with every Az cmdlet mocked. **Not yet run against a real Azure tenant**, so Az object property names for Cosmos DB, AKS, AVS and the Backup vault cmdlets are unconfirmed. |
+| **Tested with** | Claude (2026-11-24). A fresh session given only the two blocks below generated the script. The prompt was then tightened from that session's list of ambiguities, and the script was updated to match (not regenerated from scratch). The result is a single file of about 2,900 lines that parses cleanly, uses no PowerShell-7-only syntax, and passes 21 Pester tests with every Az cmdlet mocked. **Not yet run against a real Azure tenant**, so Az object property names for Cosmos DB, AKS, AVS and the Backup vault cmdlets are unconfirmed. |
 | **Author** | [@shapedthought](https://github.com/shapedthought) |
 | **Origin** | Expanded from the VM-only [`azure_assessment.ps1`](https://github.com/shapedthought/powershell/blob/master/azure_assessment.ps1) and its [spec](https://github.com/shapedthought/powershell/blob/master/azure_assessment_spec.md) |
 | **Generated script** | [`azure_environment_assessment.ps1`](https://github.com/shapedthought/powershell/blob/master/azure_environment_assessment.ps1) and its Pester tests, in shapedthought/powershell |
@@ -211,13 +211,23 @@ Requirements:
    followed by one Tag_<key> column per -TagNames entry, then the
    module-specific columns.
    - Child rows (disks, elastic pools, SQL databases, SQL MI databases,
-     file shares, AKS node pools, vault items) carry their own
-     ResourceKey, ResourceName, ResourceType and CandidateVeeamProtection
-     but inherit every other placement column from their parent: the attached VM for a disk (an unattached disk has
-     blank network columns and NetworkAccess N/A), otherwise the parent
-     server, instance, storage account, cluster or vault. Exception: an AKS
-     node pool with its own subnet is placed on that subnet, and inherits
-     the cluster's placement only when it has none.
+     AKS node pools, vault items) keep their own identity and location
+     (ResourceKey, ResourceName, ResourceType, CandidateVeeamProtection,
+     TenantId, SubscriptionId, SubscriptionName, ResourceGroup, Region,
+     Zones) -- a disk can live in a different resource group from its VM --
+     and inherit only the network placement columns (NetworkAccess, VNet*,
+     Subnet*, PrivateEndpointCount) from their parent: the attached VM for a
+     disk (an unattached disk has blank network columns and NetworkAccess
+     N/A), otherwise the parent server, instance, cluster or vault.
+     Exception: an AKS node pool with its own subnet is placed on that
+     subnet, and inherits the cluster's placement only when it has none.
+   - Storage private endpoints are per service (GroupId blob, dfs, file,
+     queue, table, web). File shares are placed and counted using only
+     'file' endpoints, plus the account's public access and network rules;
+     storage_accounts.csv rows (the Blob workload) use only 'blob' and 'dfs'
+     endpoints. An account with public access disabled and only a 'blob'
+     endpoint therefore has PublicDisabled file shares. List every endpoint
+     in network_attachments.csv regardless.
    - ResourceKey is the lower-cased Azure resource ID. It is the join key
      across all files, including network_attachments.csv.
    - NetworkAccess is exactly one of, in this precedence order:
@@ -227,15 +237,18 @@ Requirements:
                             access is Disabled
        PrivateEndpoint+Public has >=1 private endpoint and public access is
                             still enabled
-       VNetRules            public endpoint restricted to selected vNets
-                            (service endpoints / virtual network rules)
-       PublicFirewall       public endpoint restricted by IP rules only
-                            (including default Deny with zero rules; SQL
-                            servers without an allow-all 0.0.0.0-
-                            255.255.255.255 rule also count as this)
-       Public               public endpoint open to all networks
        PublicDisabled       public access disabled and no private endpoint
-                            (unreachable until connectivity is added)
+                            (unreachable until connectivity is added).
+                            Checked before the three public values below,
+                            so a disabled endpoint is never reported as
+                            reachable through a firewall.
+       VNetRules            public endpoint enabled, restricted to selected
+                            vNets (service endpoints / virtual network rules)
+       PublicFirewall       public endpoint enabled, restricted by IP rules
+                            only (including default Deny with zero rules,
+                            and SQL servers without an allow-all 0.0.0.0-
+                            255.255.255.255 rule)
+       Public               public endpoint enabled and open to all networks
        N/A                  resource has no network surface of its own
    - The VNet*/Subnet* columns describe the primary attachment: the primary
      NIC for a VM, the delegated subnet for SQL MI, the first node pool
@@ -433,10 +446,13 @@ Requirements:
      protocol and state values, timestamps, NetworkAccess and
      CandidateVeeamProtection.
    - Output file names must not contain any unhashed name, and nor may
-     errors.csv messages: Azure error text embeds resource names, so
-     replace every raw value that has been masked during the run with its
-     hash before writing the message. Do the same for the OutputPath in
-     manifest.json.
+     errors.csv messages or skip reasons. Azure error text embeds names,
+     IDs and paths the run may never have seen, so do not try to scrub it:
+     replace each message with an allowlisted diagnostic built only from
+     the HTTP status code and any Azure error codes from a fixed list in
+     the script (for example "HTTP 403; AuthorizationFailed"), or "details
+     withheld (anonymised)" when neither is present. Hash the manifest's
+     OutputPath as a whole, since it can contain user or customer names.
 
 14. Structure: a comment-based help block (synopsis, description,
    every parameter, examples for a full run, a Cloud Shell run, a
