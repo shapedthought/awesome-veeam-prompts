@@ -9,9 +9,10 @@ What sets it apart from a plain inventory is that **every resource is placed in 
 | **Product** | Veeam Backup for Microsoft Azure 8 (standalone or as the Veeam Backup & Replication 13 plug-in), plus Veeam Backup & Replication 13 and Veeam Kasten for the optional modules |
 | **Interface** | Azure PowerShell (`Az` 12.0 or later, management plane only) |
 | **Output** | PowerShell script producing CSV files, an environment summary and a JSON environment map |
-| **Tested with** | Claude (2026-11-24): a fresh session given only the two blocks below produced a single-file script (about 2,700 lines) that parsed cleanly, showed no PowerShell-7-only syntax, and passed its own 13 Pester tests with every Az cmdlet mocked. The prompt was then tightened from that session's list of ambiguities. **Not yet run against a real Azure tenant**, so Az object property names for Cosmos DB, AKS, AVS and the Backup vault cmdlets are unconfirmed. |
+| **Tested with** | Claude (2026-11-24). A fresh session given only the two blocks below generated the script. The prompt was then tightened from that session's list of ambiguities, and the script was updated to match (not regenerated from scratch). The result is a single file of about 2,900 lines that parses cleanly, uses no PowerShell-7-only syntax, and passes 20 Pester tests with every Az cmdlet mocked. **Not yet run against a real Azure tenant**, so Az object property names for Cosmos DB, AKS, AVS and the Backup vault cmdlets are unconfirmed. |
 | **Author** | [@shapedthought](https://github.com/shapedthought) |
-| **Origin** | Expanded from the VM-only [`azure_assessment.ps1`](https://github.com/shapedthought/powershell/blob/main/azure_assessment.ps1) and its [spec](https://github.com/shapedthought/powershell/blob/main/azure_assessment_spec.md) |
+| **Origin** | Expanded from the VM-only [`azure_assessment.ps1`](https://github.com/shapedthought/powershell/blob/master/azure_assessment.ps1) and its [spec](https://github.com/shapedthought/powershell/blob/master/azure_assessment_spec.md) |
+| **Generated script** | [`azure_environment_assessment.ps1`](https://github.com/shapedthought/powershell/blob/master/azure_environment_assessment.ps1) and its Pester tests, in shapedthought/powershell |
 
 There are two blocks to paste, in this order:
 
@@ -209,12 +210,14 @@ Requirements:
      SubnetPrefix, PrivateEndpointCount, CandidateVeeamProtection
    followed by one Tag_<key> column per -TagNames entry, then the
    module-specific columns.
-   - Child rows (disks, elastic pools, SQL MI databases, file shares,
-     blob containers, AKS node pools, vault items) carry their own
-     ResourceKey and ResourceName but inherit every other placement column
-     from their parent: the attached VM for a disk (an unattached disk has
+   - Child rows (disks, elastic pools, SQL databases, SQL MI databases,
+     file shares, AKS node pools, vault items) carry their own
+     ResourceKey, ResourceName, ResourceType and CandidateVeeamProtection
+     but inherit every other placement column from their parent: the attached VM for a disk (an unattached disk has
      blank network columns and NetworkAccess N/A), otherwise the parent
-     server, instance, storage account, cluster or vault.
+     server, instance, storage account, cluster or vault. Exception: an AKS
+     node pool with its own subnet is placed on that subnet, and inherits
+     the cluster's placement only when it has none.
    - ResourceKey is the lower-cased Azure resource ID. It is the join key
      across all files, including network_attachments.csv.
    - NetworkAccess is exactly one of, in this precedence order:
@@ -391,7 +394,8 @@ Requirements:
      PostgreSQL, AKS) and their policies.
    - backup_coverage.csv: one row per in-scope workload ResourceKey with
      NativeBackup = RecoveryServicesVault / BackupVault / PlatformBuiltIn
-     (Azure SQL and Cosmos DB automatic backups, when no vault covers them)
+     (the automatic backups of Azure SQL Database, SQL Managed Instance and
+     Cosmos DB, when no vault covers them)
      / None, the vault name and policy. If both vault types cover a
      resource, list both, joined with ";".
    Vault files carry the vault's own placement columns, with
