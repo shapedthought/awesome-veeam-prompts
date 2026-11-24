@@ -32,7 +32,9 @@ relabel rows.
 
 vm         | Microsoft.Compute/virtualMachines, Microsoft.Compute/disks
            | Veeam Backup for Microsoft Azure: Azure VM
-           | Flag per VM: Ultra Disk, Premium SSD v2, ephemeral OS disk,
+           | Flag per VM: Ultra Disk and Premium SSD v2 (backup supported, but
+           | some Veeam Backup & Replication "Restore to Azure" scenarios have
+           | limitations with them), ephemeral OS disk,
            | unmanaged (VHD) disks, shared disks, disk encryption type (SSE+PMK,
            | SSE+CMK, ADE, encryption at host), security type (Standard,
            | TrustedLaunch, ConfidentialVM). Report unattached managed disks
@@ -53,14 +55,23 @@ sqlmi      | Microsoft.Sql/managedInstances (+ its databases)
 cosmos     | Microsoft.DocumentDB/databaseAccounts,
            | Microsoft.DocumentDB/mongoClusters,
            | Microsoft.DBforPostgreSQL/serverGroupsv2
-           | API = NoSQL     -> Veeam Backup for Microsoft Azure: Cosmos DB for NoSQL
-           | API = MongoDB   -> Veeam Backup for Microsoft Azure: Cosmos DB for MongoDB
-           | PostgreSQL      -> Veeam Backup for Microsoft Azure: Cosmos DB for PostgreSQL
-           | Table, Gremlin, Cassandra -> Not supported (inventory only)
-           | Capture the account's native backup policy type (Periodic or
-           | Continuous, and the continuous tier). Veeam's Cosmos DB for NoSQL
-           | protection depends on continuous backup mode, so this decides
-           | whether an account is protectable as-is.
+           | API = NoSQL       -> Veeam Backup for Microsoft Azure: Cosmos DB for NoSQL
+           | API = MongoDB (RU-based) -> Veeam Backup for Microsoft Azure: Cosmos DB for MongoDB
+           | API = MongoDB (vCore, mongoClusters) -> Not supported (inventory only)
+           | API = Gremlin     -> Veeam Backup for Microsoft Azure: Cosmos DB for Apache Gremlin
+           | API = Table       -> Veeam Backup for Microsoft Azure: Cosmos DB for Table
+           | PostgreSQL        -> Veeam Backup for Microsoft Azure: Cosmos DB for PostgreSQL
+           | API = Cassandra   -> Not supported (inventory only)
+           | Protection blockers: Veeam does not process accounts that use
+           | periodic backup mode or have multi-region writes enabled (it
+           | relies on Azure continuous backup), and cannot restore accounts
+           | encrypted with customer-managed keys. Capture backup policy type
+           | (Periodic or Continuous, and the continuous tier), multi-region
+           | writes and key type for every account, and set ProtectionBlockers
+           | accordingly. Only PostgreSQL and MongoDB (RU) accounts can have
+           | backups stored in a Veeam repository; the others are protected
+           | with Azure continuous backup only. Record this as
+           | RepositoryBackupSupported.
 
 files      | Microsoft.Storage/storageAccounts/fileServices/shares
            | Veeam Backup for Microsoft Azure: Azure Files
@@ -69,7 +80,8 @@ files      | Microsoft.Storage/storageAccounts/fileServices/shares
 
 blob       | Microsoft.Storage/storageAccounts (blob service) and containers
            | Veeam Backup & Replication: object storage backup (Azure Blob)
-           | Capture hierarchical namespace (ADLS Gen2), versioning, soft
+           | Not a native Veeam Backup for Microsoft Azure source workload:
+           | that product uses Blob only as a repository target. Capture hierarchical namespace (ADLS Gen2), versioning, soft
            | delete, change feed, point-in-time restore, immutability policy,
            | redundancy and access tier. Many accounts here will turn out to be
            | Veeam repositories, diagnostics or boot-diagnostics accounts:
@@ -94,6 +106,8 @@ avs        | Microsoft.AVS/privateClouds                   (optional module)
 
 entra      | Microsoft Entra ID tenant                     (optional module)
            | Veeam Backup & Replication: Microsoft Entra ID
+           | A Veeam Backup & Replication plug-in (12.2 or later, 13.x in
+           | practice), not a Veeam Backup for Microsoft Azure workload.
            | Counts only: users, groups, applications, service principals,
            | conditional access policies, administrative units. Uses
            | Microsoft.Graph read scopes, not Az.
@@ -258,10 +272,14 @@ Requirements:
      StorageUsed_GiB (metric), LicenseType, PublicDataEndpointEnabled,
      ProxyOverride, database count; sql_mi_databases.csv: one row per
      database with the instance's placement columns.
-   - cosmos (cosmos_accounts.csv): ApiKind (NoSQL, MongoDB, Cassandra, Table,
-     Gremlin, PostgreSQL -- derived from Kind and Capabilities, not guessed
-     from the name), BackupPolicyType, ContinuousTier, periodic interval and
-     retention, write and read regions, multi-region writes,
+   - cosmos (cosmos_accounts.csv): ApiKind (NoSQL, MongoDB, MongoDBvCore,
+     Cassandra, Table, Gremlin, PostgreSQL -- derived from resource type,
+     Kind and Capabilities, not guessed from the name), BackupPolicyType,
+     ContinuousTier, periodic interval and retention, write and read
+     regions, MultiRegionWrites, KeyType (service-managed or
+     customer-managed), ProtectionBlockers (";"-joined from: PeriodicBackup,
+     MultiRegionWrites, CustomerManagedKeyRestore, UnsupportedApi; empty when
+     none), RepositoryBackupSupported, per the workload map,
      PublicNetworkAccess, IsVirtualNetworkFilterEnabled, vNet rule count,
      DataUsage_GiB and IndexUsage_GiB (metrics), database/container counts
      where the management plane exposes them, and the
@@ -394,7 +412,8 @@ cmdlets (no Azure connection) and cover: a VM whose NIC is in a vNet in a
 different subscription; a storage account whose private endpoint is in a
 hub subscription; a SQL MI on a delegated subnet; a subscription that
 returns 403 and is skipped while the run completes; a Cosmos DB account in
-periodic backup mode labelled correctly; a metric that returns nothing
+periodic backup mode with multi-region writes gets both ProtectionBlockers
+while a continuous-mode Gremlin account gets none; a metric that returns nothing
 (blank column + errors.csv row); and an anonymised run where the same vNet
 name hashes identically in vms.csv, subnets.csv and
 network_attachments.csv and no raw resource ID appears in any output file.
@@ -440,7 +459,16 @@ dev,westeurope,vnet-dev,VNetInjected:17;VNetRules:1,17,2210,0,0,1,12.0,0
 
 ## Notes
 
-* **The workload map has not been verified against a live Veeam Backup for Microsoft Azure 8 deployment or its current Help Center.** It reflects publicly documented support as of late 2026. The items most likely to need checking: which Cosmos DB APIs are supported and whether continuous backup mode is required for each, whether Blob protection is native in your Veeam Backup for Microsoft Azure version or goes through Veeam Backup & Replication object storage backup, Premium SSD v2 support, and the minimum Veeam Backup & Replication version for Entra ID. Fix the block, not the prompt, and record the version and date you checked it against.
+* **Workload map checked 2026-11-24 against the current (late 2026) Veeam Help Center**, not against a live deployment. What was checked:
+  * Cosmos DB: supported APIs are NoSQL, MongoDB (RU-based), Apache Gremlin, Table and PostgreSQL. Accounts with periodic backup or multi-region writes are not processed, and customer-managed-key accounts cannot be restored. Sources: [Considerations and Limitations](https://helpcenter.veeam.com/docs/vbazure/guide/limitations.html) and [Performing Cosmos DB Backup](https://helpcenter.veeam.com/docs/vbazure/guide/performing_cosmos_db_backup.html).
+  * Cosmos DB repository backups: only the PostgreSQL and MongoDB accounts can have backups stored in a Veeam repository. This comes from the same pages plus an older [R&D forum thread](https://forums.veeam.com/microsoft-azure-f59/comosdb-nosql-t95744.html) and may have changed, so check the release notes.
+  * Entra ID: a Veeam Backup & Replication plug-in since 12.2 ([VBR 13 Entra ID overview](https://helpcenter.veeam.com/archive/vbr/13.0.2/userguide/entra_id_overview.html)).
+
+  Still unverified:
+  * vCore-based Cosmos DB for MongoDB (`mongoClusters`) is marked unsupported only because the docs say "RU-based".
+  * Premium SSD v2 and Ultra Disk backup support and the related restore limitations come from a review comment, not a page I could read.
+
+  When something changes, fix the block, not the prompt, and update this note with the version and date you checked against.
 * Run it against one small subscription with `-Modules vm,vnet` first. Check that the vNet and subnet columns in `vms.csv` match what the portal shows before trusting the full run.
 * The script is read-only by design. If the generated code calls `Get-AzStorageAccountKey`, `New-AzStorageContext`, `New-AzStorageAccountSASToken`, `Invoke-Sqlcmd`, or any `Set-`, `New-`, `Update-` or `Remove-` cmdlet, reject it. Data-plane access is not needed for sizing, and it would need far more than Reader.
 * Hub-and-spoke is the common case, not the edge case: private endpoints and their DNS zones often live in a connectivity subscription. If the account running the script cannot read that subscription, PaaS rows will show `PrivateEndpoint*` access with blank vNet columns, and `errors.csv` will say why. Ask for Reader on the hub too.
