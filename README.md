@@ -40,6 +40,12 @@ Folders are prefixed by product, following the VeeamHub convention:
 | ------ | ----------- | ------ |
 | [BR-RotateCredentialPassword](BR-RotateCredentialPassword/) | Rotate the password on a VBR credentials record across multiple backup servers via the v13 REST API. Python (sequential, with an optional Docker add-on) and Go (parallel, goroutines) variants | Python or Go |
 
+### Veeam Backup for Microsoft 365
+
+| Prompt | Description | Output |
+| ------ | ----------- | ------ |
+| [VB365-RemoveLegacyUserData](VB365-RemoveLegacyUserData/) | Remove backed-up user data from legacy VB365 repositories (primary and backup copy) for a CSV of UPNs, using `Remove-VBOEntityData`. Read-only by default, matches on UPN against backed-up data so leavers are found, refuses ambiguous matches, and verifies the result. For clean-up after a move to Veeam Data Cloud | PowerShell script, CSV results |
+
 ### Veeam Backup for Microsoft Azure
 
 | Prompt | Description | Output |
