@@ -9,8 +9,9 @@ The script is built to fail safe. By default it only reports what it found. Dele
 | **Product** | Veeam Backup for Microsoft 365 8 |
 | **Interface** | PowerShell (`Veeam.Archiver.PowerShell` module, run on the VB365 server) |
 | **Output** | PowerShell script, CSV results file, transcript |
-| **Tested with** | Not yet. The cmdlet contract was checked against the Help Center pages (dated 2026-08-21) on 2026-11-27. It has not yet been run through an LLM or against a live VB365 server. |
+| **Tested with** | Claude (2026-11-27). The script was generated in the same session that wrote the prompt, not a fresh one, so it is a weaker test than a cold run. It parses cleanly, uses no PowerShell-7-only syntax, and passes 22 Pester tests with every Veeam cmdlet mocked. The cmdlet contract was checked against the Help Center pages (dated 2026-08-21). **Not yet run against a live VB365 server**, so Veeam object property names are unconfirmed. |
 | **Author** | [@shapedthought](https://github.com/shapedthought) |
+| **Generated script** | [`vb365_remove_legacy_user_data.ps1`](https://github.com/shapedthought/powershell/blob/master/vb365_remove_legacy_user_data.ps1) and its Pester tests, in shapedthought/powershell |
 
 There are two blocks to paste, in this order:
 
@@ -182,7 +183,9 @@ those cases yourself.)
 * Do not resolve users with `Get-VBOOrganizationUser` alone. It queries the live tenant, so users already deleted from Entra ID are not found and their data is skipped.
 * `-Sites` covers the user's own sites data. SharePoint, Group and Team sites the user worked in are separate entities and are out of scope for this prompt.
 * What is not yet confirmed on a live server: the property names on the `Get-VBOEntityData` user object (email/UPN, display name, workload flags), the repository immutability property, and the `Get-VBODataManagementSession` properties. The prompt makes the script discover these with `Get-Member` and stop if they are missing. Check the Inventory output against the VB365 console before you trust it.
-* Models tend to get these wrong: looking users up by display name, defaulting to all workloads, adding `-Confirm:$false` everywhere, using `-RunAsync` in a loop, and "helpfully" disabling jobs. The requirements call each of these out, so check for them in the output.
+* Whether a user disappears from `Get-VBOEntityData` once all its workloads are removed is not documented. The generated script reports `RemovedButStillListed` (and exits non-zero) when the user is still listed afterwards, with the remaining workload flags. Expect that after a partial removal. After a full removal, check the user in Veeam Explorer before treating it as a failure.
+* `Import-Csv` silently drops empty and whitespace-only lines, so those never reach the blank-row check. Only quoted blank values are caught. That is harmless, but do not rely on the row count in the CSV matching the user count.
+* Models tend to get these wrong: looking users up by display name, defaulting to all workloads, adding `-Confirm:$false` everywhere, using `-RunAsync` in a loop, and "helpfully" disabling jobs. Also check for `continue` inside a `switch` block in the main loop: in PowerShell it applies to the switch, not the loop, so the code falls through to the removal step. The first draft of the generated script made exactly this mistake. The requirements call each of these out, so check for them in the output.
 
 ## Disclaimer
 
